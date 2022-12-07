@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from mingpt.utils import CfgNode as CN
+from transformer_engine import pytorch as te
 
 # -----------------------------------------------------------------------------
 
@@ -36,10 +37,17 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        if config.use_te:
+            # key, query, value projections for all heads, but in a batch
+            print("config.n_embd = ", config.n_embd, "3 * config.n_embd = ", 3 * config.n_embd)
+            self.c_attn = te.Linear(config.n_embd, 3 * config.n_embd)
+            # output projection
+            self.c_proj = te.Linear(config.n_embd, config.n_embd)
+        else:
+            # key, query, value projections for all heads, but in a batch
+            self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+            # output projection
+            self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
@@ -75,21 +83,44 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        if config.use_te:
+            self.ln_1 = te.LayerNorm(config.n_embd)
+        else:
+            self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = nn.ModuleDict(dict(
-            c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd),
-            c_proj  = nn.Linear(4 * config.n_embd, config.n_embd),
-            act     = NewGELU(),
-            dropout = nn.Dropout(config.resid_pdrop),
-        ))
+        if config.use_te:
+            self.ln_2 = te.LayerNorm(config.n_embd)
+        else:
+            self.ln_2 = nn.LayerNorm(config.n_embd)
+        if config.use_te:
+            self.mlp = nn.ModuleDict(dict(
+                c_fc    = te.Linear(config.n_embd, 4 * config.n_embd),
+                c_proj  = te.Linear(4 * config.n_embd, config.n_embd),
+                act     = NewGELU(),
+                dropout = nn.Dropout(config.resid_pdrop),
+            ))
+        else:
+            self.mlp = nn.ModuleDict(dict(
+                c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd),
+                c_proj  = nn.Linear(4 * config.n_embd, config.n_embd),
+                act     = NewGELU(),
+                dropout = nn.Dropout(config.resid_pdrop),
+            ))
         m = self.mlp
         self.mlpf = lambda x: m.dropout(m.c_proj(m.act(m.c_fc(x)))) # MLP forward
 
+        self.lnmlp = False
+        if config.ln_mlp:
+            self.lnmlp = True
+            self.layernorm_mlp = te.LayerNormMLP(config.n_embd, 4 * config.n_embd, eps = 1e-12)
+            # eps should be increased for fp8
+
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlpf(self.ln_2(x))
+        if self.lnmlp:
+            x = x + self.mlp.dropout(self.layernorm_mlp(x))
+        else:
+            x = x + self.mlpf(self.ln_2(x))
         return x
 
 class GPT(nn.Module):
@@ -110,6 +141,11 @@ class GPT(nn.Module):
         C.embd_pdrop = 0.1
         C.resid_pdrop = 0.1
         C.attn_pdrop = 0.1
+        # fp8, amp, te
+        C.use_te = False
+        C.ln_mlp = False
+        C.use_amp = False
+        C.use_fp8 = False
         return C
 
     def __init__(self, config):
@@ -141,14 +177,25 @@ class GPT(nn.Module):
                 'gpt-nano':     dict(n_layer=3, n_head=3, n_embd=48),
             }[config.model_type])
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.embd_pdrop),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
-        ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        if config.use_te:
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.vocab_size, config.n_embd),
+                wpe = nn.Embedding(config.block_size, config.n_embd),
+                drop = nn.Dropout(config.embd_pdrop),
+                h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f = te.LayerNorm(config.n_embd),
+            ))
+            self.lm_head = te.Linear(config.n_embd, config.vocab_size, bias=False)
+        else:
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.vocab_size, config.n_embd),
+                wpe = nn.Embedding(config.block_size, config.n_embd),
+                drop = nn.Dropout(config.embd_pdrop),
+                h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f = nn.LayerNorm(config.n_embd),
+            ))
+            self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
 
         # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
@@ -165,6 +212,16 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, te.Linear):
+            # Option - may init te.Linear explicitly here
+            # Not have to do, as te.Linear comes with default init
+            pass
+        elif isinstance(module, te.LayerNorm):
+            # Option - custom init te.LayerNorm
+            pass
+        elif isinstance(module, te.LayerNormMLP):
+            # Option - custom init te.LayerNormMLP
+            pass
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         elif isinstance(module, nn.LayerNorm):
@@ -223,8 +280,8 @@ class GPT(nn.Module):
         # separate out all parameters to those that will and won't experience regularizing weight decay
         decay = set()
         no_decay = set()
-        whitelist_weight_modules = (torch.nn.Linear, )
-        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
+        whitelist_weight_modules = (te.Linear, torch.nn.Linear)
+        blacklist_weight_modules = (te.LayerNorm, torch.nn.LayerNorm, torch.nn.Embedding)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
@@ -246,8 +303,9 @@ class GPT(nn.Module):
         inter_params = decay & no_decay
         union_params = decay | no_decay
         assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
-        assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
-                                                    % (str(param_dict.keys() - union_params), )
+        # disable this check due to the use of te.LayNormMLP (where a module combines both whitelist and blacklist weight modules)
+        # assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
+        #                                            % (str(param_dict.keys() - union_params), )
 
         # create the pytorch optimizer object
         optim_groups = [

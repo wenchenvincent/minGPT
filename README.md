@@ -1,5 +1,20 @@
+# GPT powered Sorting application, integration for Transformer Engine
+
+### Usage
+
+```
+# gpt to sort, use transformer_engine's modules: Linear and LayerNorm
+python gptSort.py --use-te
+
+# gpt to sort, in addition use transformer_engine's LayerNormMLP
+python gptSort.py --use-te --ln-mlp
+
+# use 'gpt-nano' by default; available models: {'gpt-micro', 'gpt-mini', 'openai-gpt', 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+```
 
 # minGPT
+
+### By: Andrej Karpathy (ex-Stanford | OpenAI | Tesla)
 
 ![mingpt](mingpt.jpg)
 
