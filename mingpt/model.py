@@ -9,6 +9,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 """
 
 import math
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -17,6 +18,13 @@ from torch.nn import functional as F
 from mingpt.utils import CfgNode as CN
 from transformer_engine import pytorch as te
 
+# -----------------------------------------------------------------------------
+# Default TE Affine init: init_method_normal(0.023)
+def init_method_normal(sigma: float) -> Callable:
+    """Init method based on N(0, sigma)."""
+    def init_(tensor: torch.Tensor) -> Callable:
+        return torch.nn.init.normal_(tensor, mean=0.0, std=sigma)
+    return init_
 # -----------------------------------------------------------------------------
 
 class NewGELU(nn.Module):
@@ -40,9 +48,9 @@ class CausalSelfAttention(nn.Module):
         if config.use_te:
             # key, query, value projections for all heads, but in a batch
             print("config.n_embd = ", config.n_embd, "3 * config.n_embd = ", 3 * config.n_embd)
-            self.c_attn = te.Linear(config.n_embd, 3 * config.n_embd)
+            self.c_attn = te.Linear(config.n_embd, 3 * config.n_embd, init_method = config.init_method)
             # output projection
-            self.c_proj = te.Linear(config.n_embd, config.n_embd)
+            self.c_proj = te.Linear(config.n_embd, config.n_embd, init_method = config.init_project)
         else:
             # key, query, value projections for all heads, but in a batch
             self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
@@ -94,8 +102,8 @@ class Block(nn.Module):
             self.ln_2 = nn.LayerNorm(config.n_embd)
         if config.use_te:
             self.mlp = nn.ModuleDict(dict(
-                c_fc    = te.Linear(config.n_embd, 4 * config.n_embd),
-                c_proj  = te.Linear(4 * config.n_embd, config.n_embd),
+                c_fc    = te.Linear(config.n_embd, 4 * config.n_embd, init_method = config.init_method),
+                c_proj  = te.Linear(4 * config.n_embd, config.n_embd, init_method = config.init_project),
                 act     = NewGELU(),
                 dropout = nn.Dropout(config.resid_pdrop),
             ))
@@ -112,7 +120,7 @@ class Block(nn.Module):
         self.lnmlp = False
         if config.ln_mlp:
             self.lnmlp = True
-            self.layernorm_mlp = te.LayerNormMLP(config.n_embd, 4 * config.n_embd, eps = 1e-12)
+            self.layernorm_mlp = te.LayerNormMLP(config.n_embd, 4 * config.n_embd, eps = 1e-12, init_method = config.init_method)
             # eps should be increased for fp8
 
     def forward(self, x):
@@ -146,6 +154,8 @@ class GPT(nn.Module):
         C.ln_mlp = False
         C.use_amp = False
         C.use_fp8 = False
+        C.init_method = init_method_normal(0.02)
+        C.init_project = None
         return C
 
     def __init__(self, config):
@@ -177,6 +187,9 @@ class GPT(nn.Module):
                 'gpt-nano':     dict(n_layer=3, n_head=3, n_embd=48),
             }[config.model_type])
 
+        # special scaled init to the residual projection layers, per GPT-2 paper 2.3
+        config.init_project = init_method_normal(0.02/math.sqrt(2 * config.n_layer))
+
         if config.use_te:
             self.transformer = nn.ModuleDict(dict(
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -185,7 +198,7 @@ class GPT(nn.Module):
                 h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 ln_f = te.LayerNorm(config.n_embd),
             ))
-            self.lm_head = te.Linear(config.n_embd, config.vocab_size, bias=False)
+            self.lm_head = te.Linear(config.n_embd, config.vocab_size, bias=False, init_method = config.init_method)
         else:
             self.transformer = nn.ModuleDict(dict(
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -213,14 +226,14 @@ class GPT(nn.Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, te.Linear):
-            # Option - may init te.Linear explicitly here
-            # Not have to do, as te.Linear comes with default init
+            # Option - init te.Linear explicitly, but
+            # not here, at te.Linear creation instead
             pass
         elif isinstance(module, te.LayerNorm):
-            # Option - custom init te.LayerNorm
+            # No need, same init as nn.LayerNorm
             pass
         elif isinstance(module, te.LayerNormMLP):
-            # Option - custom init te.LayerNormMLP
+            # Option, init at te.LayerNormMLP()
             pass
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
