@@ -23,7 +23,7 @@ class SortDataset(Dataset):
     where I is "ignore", as the transformer is reading the input sequence
     """
 
-    def __init__(self, split, length=6, num_digits=3):
+    def __init__(self, split, length=12, num_digits=5):
         assert split in {'train', 'test'}
         self.split = split
         self.length = length
@@ -146,7 +146,7 @@ def main():
 
     # create a GPT instance
     model_config = GPT.get_default_config()
-    model_config.model_type = 'gpt-nano'
+    model_config.model_type = 'gpt-mini'
     model_config.vocab_size = train_dataset.get_vocab_size()
     model_config.block_size = train_dataset.get_block_size()
 
@@ -181,7 +181,7 @@ def main():
 
     # let's run a random given sequence through the model as well
     n = train_dataset.length # naugy direct access shrug
-    inp = torch.tensor([[0, 0, 2, 1, 0, 1]], dtype=torch.long).to(trainer.device)
+    inp = torch.tensor([[0, 4, 2, 1, 0, 1, 3, 0, 4, 1, 2, 3]], dtype=torch.long).to(trainer.device)
     assert inp[0].nelement() == n
     with torch.no_grad():
         cat = model.generate(inp, n, do_sample=False)
