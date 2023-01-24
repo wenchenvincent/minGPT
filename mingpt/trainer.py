@@ -17,8 +17,10 @@ class Trainer:
         def forward_hook(module, input, output):
             self.input_activations[name] = input[0].detach()
             self.output_activations[name] = output.detach()
-            self.weights[name] = module.weight.detach()
-            self.biases[name] = module.bias.detach()
+            if hasattr(module, 'weight'):
+                self.weights[name] = module.weight.detach()
+            if hasattr(module, 'bias'):
+                self.biases[name] = module.bias.detach()
         return forward_hook
 
     ## Hook to record gradient tensors in the backward pass
@@ -29,8 +31,10 @@ class Trainer:
             ## grad_output are gradients wrt outputs of the layer
             self.output_gradients[name] = grad_output[0].detach()
             self.input_gradients[name] = grad_input[0].detach()
-            self.weight_gradients[name] = module.weight.grad.detach()
-            self.bias_gradients[name] = module.bias.grad.detach()
+            if hasattr(module, 'weight'):
+                self.weight_gradients[name] = module.weight.grad.detach()
+            if hasattr(module, 'bias'):
+                self.bias_gradients[name] = module.bias.grad.detach()
         return backward_hook
 
     @staticmethod
@@ -106,7 +110,11 @@ class Trainer:
 
         model.train()
         model.transformer.h[0].mlp.c_fc.register_forward_hook(self.get_activation('transformer.mlp.c_fc'))
+        model.transformer.h[0].mlp.act.register_forward_hook(self.get_activation('transformer.mlp.gelu'))
+        model.transformer.h[0].mlp.c_proj.register_forward_hook(self.get_activation('transformer.mlp.c_proj'))
         model.transformer.h[0].mlp.c_fc.register_full_backward_hook(self.get_gradient('transformer.mlp.c_fc'))
+        model.transformer.h[0].mlp.act.register_full_backward_hook(self.get_gradient('transformer.mlp.gelu'))
+        model.transformer.h[0].mlp.c_proj.register_full_backward_hook(self.get_gradient('transformer.mlp.c_proj'))
         self.iter_num = 0
         self.iter_time = time.time()
         data_iter = iter(train_loader)
@@ -133,11 +141,17 @@ class Trainer:
             torch.save(self.weights['transformer.mlp.c_fc'], 'weight.pt')
             torch.save(self.biases['transformer.mlp.c_fc'], 'bias.pt')
             torch.save(self.output_activations['transformer.mlp.c_fc'], 'output.pt')
+            torch.save(self.input_activations['transformer.mlp.gelu'], 'gelu_input.pt')
+            torch.save(self.output_activations['transformer.mlp.gelu'], 'gelu_output.pt')
+            torch.save(self.weights['transformer.mlp.c_proj'], 'weight2.pt')
 
             torch.save(self.output_gradients['transformer.mlp.c_fc'], 'output_grad.pt')
             torch.save(self.input_gradients['transformer.mlp.c_fc'], 'input_grad.pt')
             torch.save(self.weight_gradients['transformer.mlp.c_fc'], 'weight_grad.pt')
             torch.save(self.bias_gradients['transformer.mlp.c_fc'], 'bias_grad.pt')
+            torch.save(self.input_gradients['transformer.mlp.gelu'], 'gelu_input_grad.pt')
+            torch.save(self.output_gradients['transformer.mlp.gelu'], 'gelu_output_grad.pt')
+            torch.save(self.output_gradients['transformer.mlp.c_proj'], 'output_grad2.pt')
             sys.exit(0)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_norm_clip)
