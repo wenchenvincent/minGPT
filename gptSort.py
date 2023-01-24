@@ -1,3 +1,4 @@
+import sys
 import argparse
 import torch
 from torch.utils.data import Dataset
@@ -74,8 +75,32 @@ class SortDataset(Dataset):
         return x, y
 
 def batch_end_callback(trainer):
+    '''
+    print('transform.mlp.c_fc input activation =', input_activations['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc weight =', weights['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc bias =', biases['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc output activation =', output_activations['transformer.mlp.c_fc'])
+
+    print('transform.mlp.c_fc output gradient =', output_gradients['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc input gradient =', input_gradients['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc weight gradient =', weight_gradients['transformer.mlp.c_fc'])
+    print('transform.mlp.c_fc bias gradient =', bias_gradients['transformer.mlp.c_fc'])
+    '''
+    #print('transform.mlp.c_fc input activation =', input_activations['transformer.mlp.c_fc'])
     if trainer.iter_num % 100 == 0:
         print(f"iter_dt {trainer.iter_dt * 1000:.2f}ms; iter {trainer.iter_num}: train loss {trainer.loss.item():.5f}")
+        '''
+        torch.save(trainer.input_activations['transformer.mlp.c_fc'], 'input.pt')
+        torch.save(trainer.weights['transformer.mlp.c_fc'], 'weight.pt')
+        torch.save(trainer.biases['transformer.mlp.c_fc'], 'bias.pt')
+        torch.save(trainer.output_activations['transformer.mlp.c_fc'], 'output.pt')
+
+        torch.save(trainer.output_gradients['transformer.mlp.c_fc'], 'output_grad.pt')
+        torch.save(trainer.input_gradients['transformer.mlp.c_fc'], 'input_grad.pt')
+        torch.save(trainer.weight_gradients['transformer.mlp.c_fc'], 'weight_grad.pt')
+        torch.save(trainer.bias_gradients['transformer.mlp.c_fc'], 'bias_grad.pt')
+        sys.exit(0)
+        '''
 
 def eval_split(model, trainer, trainset, testset, split, max_batches):
     dataset = {'train':trainset, 'test':testset}[split]
@@ -104,6 +129,39 @@ def eval_split(model, trainer, trainset, testset, split, max_batches):
     rt = torch.tensor(results, dtype=torch.float)
     print("%s final score: %d/%d = %.2f%% correct" % (split, rt.sum(), len(results), 100*rt.mean()))
     return rt.sum()
+
+############################################################################
+###  Auxiliary functions for debugging
+############################################################################
+
+input_activations = {}
+output_activations = {}
+weights = {}
+biases = {}
+## Hook to record activation tensors in the forward pass
+def get_activation(name):
+    def forward_hook(module, input, output):
+        input_activations[name] = input[0].detach()
+        output_activations[name] = output.detach()
+        weights[name] = module.weight.detach()
+        biases[name] = module.bias.detach()
+    return forward_hook
+
+output_gradients = {}
+input_gradients = {}
+weight_gradients = {}
+bias_gradients = {}
+## Hook to record gradient tensors in the backward pass
+def get_gradient(name):
+    def backward_hook(module, grad_input, grad_output):
+        ## grad_output and grad_input are tuples
+        ## grad_input are gradients wrt inputs of the layer
+        ## grad_output are gradients wrt outputs of the layer
+        output_gradients[name] = grad_output[0].detach()
+        input_gradients[name] = grad_input[0].detach()
+        weight_gradients[name] = module.weight.grad.detach()
+        bias_gradients[name] = module.bias.grad.detach()
+    return backward_hook
 
 def main():
     # Training settings
@@ -161,6 +219,12 @@ def main():
 
     model = GPT(model_config)
 
+    '''
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.data)
+    '''
+
     # create a Trainer object
     train_config = Trainer.get_default_config()
     train_config.learning_rate = args.lr
@@ -168,6 +232,8 @@ def main():
     train_config.max_iters = args.miters
     train_config.num_workers = 0
     trainer = Trainer(train_config, model, train_dataset)
+    
+
     trainer.set_callback('on_batch_end', batch_end_callback)
     trainer.run()
 
